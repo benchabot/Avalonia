@@ -5,13 +5,14 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
-using Avalonia.Controls.Generators;
 using Avalonia.Controls.Utils;
 using Avalonia.Data;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
+
+#nullable enable
 
 namespace Avalonia.Controls.Primitives
 {
@@ -108,20 +109,19 @@ namespace Avalonia.Controls.Primitives
                 "SelectionChanged",
                 RoutingStrategies.Bubble);
 
-        private static readonly IList Empty = Array.Empty<object>();
         private readonly SelectedItemsSync _selectedItems;
         private ISelectionModel _selection;
         private int _selectedIndex = -1;
-        private object _selectedItem;
+        private object? _selectedItem;
         private bool _ignoreContainerSelectionChanged;
         private int _updateCount;
         private int _updateSelectedIndex;
-        private object _updateSelectedItem;
+        private object? _updateSelectedItem;
 
         public SelectingItemsControl()
         {
-            // Setting Selection to null causes a default SelectionModel to be created.
-            Selection = null;
+            _selection = CreateDefaultSelectionModel();
+            InitializeSelectionModel();
             _selectedItems = new SelectedItemsSync(Selection);
         }
 
@@ -184,7 +184,7 @@ namespace Avalonia.Controls.Primitives
             {
                 if (_updateCount == 0)
                 {
-                    SelectedIndex = IndexOf(Items, value);
+                    SelectedIndex = ItemsView.IndexOf(value);
                 }
                 else
                 {
@@ -211,12 +211,7 @@ namespace Avalonia.Controls.Primitives
             get => _selection;
             set
             {
-                value ??= new SelectionModel
-                {
-                    SingleSelect = !SelectionMode.HasFlagCustom(SelectionMode.Multiple),
-                    AutoSelect = SelectionMode.HasFlagCustom(SelectionMode.AlwaysSelected),
-                    RetainSelectionOnReset = true,
-                };
+                value ??= CreateDefaultSelectionModel();
 
                 if (_selection != value)
                 {
@@ -229,7 +224,7 @@ namespace Avalonia.Controls.Primitives
                         throw new ArgumentException("Selection has invalid Source.");
                     }
 
-                    List<object> oldSelection = null;
+                    List<object>? oldSelection = null;
 
                     if (_selection != null)
                     {
@@ -249,55 +244,7 @@ namespace Avalonia.Controls.Primitives
                             Array.Empty<object>()));
                     }
 
-                    if (_selection != null)
-                    {
-                        _selection.Source = Items;
-                        _selection.PropertyChanged += OnSelectionModelPropertyChanged;
-                        _selection.SelectionChanged += OnSelectionModelSelectionChanged;
-
-                        if (_selection.SingleSelect)
-                        {
-                            SelectionMode &= ~SelectionMode.Multiple;
-                        }
-                        else
-                        {
-                            SelectionMode |= SelectionMode.Multiple;
-                        }
-
-                        if (_selection.AutoSelect)
-                        {
-                            SelectionMode |= SelectionMode.AlwaysSelected;
-                        }
-                        else
-                        {
-                            SelectionMode &= ~SelectionMode.AlwaysSelected;
-                        }
-
-                        UpdateContainerSelection();
-
-                        var selectedIndex = SelectedIndex;
-                        var selectedItem = SelectedItem;
-
-                        if (_selectedIndex != selectedIndex)
-                        {
-                            RaisePropertyChanged(SelectedIndexProperty, _selectedIndex, selectedIndex);
-                            _selectedIndex = selectedIndex;
-                        }
-
-                        if (_selectedItem != selectedItem)
-                        {
-                            RaisePropertyChanged(SelectedItemProperty, _selectedItem, selectedItem);
-                            _selectedItem = selectedItem;
-                        }
-                        
-                        if (selectedIndex != -1)
-                        {
-                            RaiseEvent(new SelectionChangedEventArgs(
-                                SelectionChangedEvent,
-                                Array.Empty<object>(),
-                                Selection.SelectedItems.ToList()));
-                        }
-                    }
+                    InitializeSelectionModel();
                 }
             }
         }
@@ -346,21 +293,22 @@ namespace Avalonia.Controls.Primitives
         /// Scrolls the specified item into view.
         /// </summary>
         /// <param name="item">The item.</param>
-        public void ScrollIntoView(object item) => ScrollIntoView(IndexOf(Items, item));
+        public void ScrollIntoView(object item) => ScrollIntoView(ItemsView.IndexOf(item));
 
         /// <summary>
         /// Tries to get the container that was the source of an event.
         /// </summary>
         /// <param name="eventSource">The control that raised the event.</param>
         /// <returns>The container or null if the event did not originate in a container.</returns>
-        protected IControl GetContainerFromEventSource(IInteractive eventSource)
+        protected IControl? GetContainerFromEventSource(IInteractive eventSource)
         {
             var parent = (IVisual)eventSource;
 
             while (parent != null)
             {
-                if (parent is IControl control && control.LogicalParent == this
-                                               && ItemContainerGenerator?.IndexFromContainer(control) != -1)
+                if (parent is IControl control &&
+                    control.LogicalParent == this &&
+                    GetContainerIndex(control) != -1)
                 {
                     return control;
                 }
@@ -372,71 +320,30 @@ namespace Avalonia.Controls.Primitives
         }
 
         /// <inheritdoc/>
-        protected override void ItemsChanged(AvaloniaPropertyChangedEventArgs e)
+        protected override void OnContainerPrepared(ElementPreparedEventArgs e)
         {
-            if (_updateCount == 0)
-            {
-                Selection.Source = e.NewValue;
-            }
-
-            base.ItemsChanged(e);
+            base.OnContainerPrepared(e);
+            MarkContainerSelected(e.Element, _selection.IsSelected(e.Index));
         }
 
-        /// <inheritdoc/>
-        protected override void ItemsCollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+        protected override void OnContainerClearing(ElementClearingEventArgs e)
         {
-            base.ItemsCollectionChanged(sender, e);
-        }
+            base.OnContainerClearing(e);
+            MarkContainerSelected(e.Element, false);
 
-        /// <inheritdoc/>
-        protected override void OnContainersMaterialized(ItemContainerEventArgs e)
-        {
-            base.OnContainersMaterialized(e);
-
-            foreach (var container in e.Containers)
+            if (Presenter is InputElement inputElement)
             {
-                if ((container.ContainerControl as ISelectable)?.IsSelected == true)
+                if (KeyboardNavigation.GetTabOnceActiveElement(inputElement) == e.Element)
                 {
-                    Selection.Select(container.Index);
-                    MarkContainerSelected(container.ContainerControl, true);
-                }
-                else if (Selection.IsSelected(container.Index) == true)
-                {
-                    MarkContainerSelected(container.ContainerControl, true);
+                    KeyboardNavigation.SetTabOnceActiveElement(inputElement, null);
                 }
             }
         }
 
-        /// <inheritdoc/>
-        protected override void OnContainersDematerialized(ItemContainerEventArgs e)
+        protected override void OnContainerIndexChanged(ElementIndexChangedEventArgs e)
         {
-            base.OnContainersDematerialized(e);
-
-            var panel = (InputElement)Presenter.Panel;
-
-            if (panel != null)
-            {
-                foreach (var container in e.Containers)
-                {
-                    if (KeyboardNavigation.GetTabOnceActiveElement(panel) == container.ContainerControl)
-                    {
-                        KeyboardNavigation.SetTabOnceActiveElement(panel, null);
-                        break;
-                    }
-                }
-            }
-        }
-
-        protected override void OnContainersRecycled(ItemContainerEventArgs e)
-        {
-            foreach (var i in e.Containers)
-            {
-                if (i.ContainerControl != null && i.Item != null)
-                {
-                    bool selected = Selection.IsSelected(i.Index) == true;
-                    MarkContainerSelected(i.ContainerControl, selected);
-                }
-            }
+            base.OnContainerIndexChanged(e);
+            MarkContainerSelected(e.Element, _selection.IsSelected(e.NewIndex));
         }
 
         /// <inheritdoc/>
@@ -459,7 +366,21 @@ namespace Avalonia.Controls.Primitives
         {
             base.OnPropertyChanged(change);
 
-            if (change.Property == SelectionModeProperty)
+            if (change.Property == ItemsProperty)
+            {
+                var oldValue = change.OldValue.GetValueOrDefault<IEnumerable>();
+
+                if (oldValue is INotifyCollectionChanged incc)
+                {
+                    incc.CollectionChanged -= AfterItemsCollectionChanged;
+                }
+
+                if (_updateCount == 0)
+                {
+                    Selection.Source = change.NewValue.GetValueOrDefault<object>();
+                }
+            }
+            else if (change.Property == SelectionModeProperty)
             {
                 var mode = change.NewValue.GetValueOrDefault<SelectionMode>();
                 Selection.SingleSelect = !mode.HasFlagCustom(SelectionMode.Multiple);
@@ -495,7 +416,7 @@ namespace Avalonia.Controls.Primitives
         /// <returns>True if the selection was moved; otherwise false.</returns>
         protected bool MoveSelection(NavigationDirection direction, bool wrap)
         {
-            var from = SelectedIndex != -1 ? ItemContainerGenerator.ContainerFromIndex(SelectedIndex) : null;
+            var from = SelectedIndex != -1 ? TryGetContainer(SelectedIndex) : null;
             return MoveSelection(from, direction, wrap);
         }
 
@@ -506,12 +427,12 @@ namespace Avalonia.Controls.Primitives
         /// <param name="direction">The direction to move.</param>
         /// <param name="wrap">Whether to wrap when the selection reaches the first or last item.</param>
         /// <returns>True if the selection was moved; otherwise false.</returns>
-        protected bool MoveSelection(IControl from, NavigationDirection direction, bool wrap)
+        protected bool MoveSelection(IControl? from, NavigationDirection direction, bool wrap)
         {
-            if (Presenter?.Panel is INavigableContainer container &&
+            if (Presenter is INavigableContainer container &&
                 GetNextControl(container, direction, from, wrap) is IControl next)
             {
-                var index = ItemContainerGenerator.IndexFromContainer(next);
+                var index = GetContainerIndex(next);
 
                 if (index != -1)
                 {
@@ -538,70 +459,69 @@ namespace Avalonia.Controls.Primitives
             bool toggleModifier = false,
             bool rightButton = false)
         {
-            if (index != -1)
+            if (index < 0 || index >= ItemCount)
             {
-                if (select)
+                return;
+            }
+
+            var mode = SelectionMode;
+            var multi = (mode & SelectionMode.Multiple) != 0;
+            var toggle = (toggleModifier || (mode & SelectionMode.Toggle) != 0);
+            var range = multi && rangeModifier;
+
+            if (!select)
+            {
+                Selection.Deselect(index);
+            }
+            else if (rightButton)
+            {
+                if (Selection.IsSelected(index) == false)
                 {
-                    var mode = SelectionMode;
-                    var multi = (mode & SelectionMode.Multiple) != 0;
-                    var toggle = (toggleModifier || (mode & SelectionMode.Toggle) != 0);
-                    var range = multi && rangeModifier;
+                    SelectedIndex = index;
+                }
+            }
+            else if (range)
+            {
+                using var operation = Selection.Update();
+                var anchor = Selection.AnchorIndex;
 
-                    if (rightButton)
-                    {
-                        if (Selection.IsSelected(index) == false)
-                        {
-                            SelectedIndex = index;
-                        }
-                    }
-                    else if (range)
-                    {
-                        using var operation = Selection.Update();
-                        var anchor = Selection.AnchorIndex;
+                if (anchor.GetSize() == 0)
+                {
+                    anchor = new IndexPath(0);
+                }
 
-                        if (anchor.GetSize() == 0)
-                        {
-                            anchor = new IndexPath(0);
-                        }
-
-                        Selection.ClearSelection();
-                        Selection.AnchorIndex = anchor;
-                        Selection.SelectRangeFromAnchor(index);
-                    }
-                    else if (multi && toggle)
-                    {
-                        if (Selection.IsSelected(index) == true)
-                        {
-                            Selection.Deselect(index);
-                        }
-                        else
-                        {
-                            Selection.Select(index);
-                        }
-                    }
-                    else if (toggle)
-                    {
-                        SelectedIndex = (SelectedIndex == index) ? -1 : index;
-                    }
-                    else
-                    {
-                        using var operation = Selection.Update();
-                        Selection.ClearSelection();
-                        Selection.Select(index);
-                    }
-
-                    if (Presenter?.Panel != null)
-                    {
-                        var container = ItemContainerGenerator.ContainerFromIndex(index);
-                        KeyboardNavigation.SetTabOnceActiveElement(
-                            (InputElement)Presenter.Panel,
-                            container);
-                    }
+                Selection.ClearSelection();
+                Selection.AnchorIndex = anchor;
+                Selection.SelectRangeFromAnchor(index);
+            }
+            else if (multi && toggle)
+            {
+                if (Selection.IsSelected(index) == true)
+                {
+                    Selection.Deselect(index);
                 }
                 else
                 {
-                    LostSelection();
+                    Selection.Select(index);
                 }
+            }
+            else if (toggle)
+            {
+                SelectedIndex = (SelectedIndex == index) ? -1 : index;
+            }
+            else
+            {
+                using var operation = Selection.Update();
+                Selection.ClearSelection();
+                Selection.Select(index);
+            }
+
+            if (Presenter != null)
+            {
+                var container = TryGetContainer(index);
+                KeyboardNavigation.SetTabOnceActiveElement(
+                    (InputElement)Presenter,
+                    container);
             }
         }
 
@@ -620,7 +540,7 @@ namespace Avalonia.Controls.Primitives
             bool toggleModifier = false,
             bool rightButton = false)
         {
-            var index = ItemContainerGenerator?.IndexFromContainer(container) ?? -1;
+            var index = GetContainerIndex(container);
 
             if (index != -1)
             {
@@ -673,6 +593,20 @@ namespace Avalonia.Controls.Primitives
                     ScrollIntoView(Selection.AnchorIndex.GetAt(0));
                 }
             }
+            else if (e.PropertyName == nameof(SelectionModel.Source))
+            { 
+                if (Items is object && _selection.Source == Items)
+                {
+                    // At this point we can be sure that SelectionModel has subscribed to collection
+                    // changes.
+                    AddSelectedContainersToSelection(0, Items);
+
+                    if (_selection.Source is INotifyCollectionChanged incc)
+                    {
+                        incc.CollectionChanged += AfterItemsCollectionChanged;
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -684,7 +618,7 @@ namespace Avalonia.Controls.Primitives
         {
             void Mark(int index, bool selected)
             {
-                var container = ItemContainerGenerator.ContainerFromIndex(index);
+                var container = TryGetContainer(index);
 
                 if (container != null)
                 {
@@ -748,7 +682,7 @@ namespace Avalonia.Controls.Primitives
                 if (control != null &&
                     selectable != null &&
                     control.LogicalParent == this &&
-                    ItemContainerGenerator?.IndexFromContainer(control) != -1)
+                    GetContainerIndex(control) != -1)
                 {
                     UpdateSelection(control, selectable.IsSelected);
                 }
@@ -760,21 +694,82 @@ namespace Avalonia.Controls.Primitives
             }
         }
 
-        /// <summary>
-        /// Called when the currently selected item is lost and the selection must be changed
-        /// depending on the <see cref="SelectionMode"/> property.
-        /// </summary>
-        private void LostSelection()
+        private void InitializeSelectionModel()
         {
-            var items = Items?.Cast<object>();
-            var index = -1;
+            _selection.Source = Items;
+            _selection.PropertyChanged += OnSelectionModelPropertyChanged;
+            _selection.SelectionChanged += OnSelectionModelSelectionChanged;
 
-            if (items != null && AlwaysSelected)
+            if (_selection.SingleSelect)
             {
-                index = Math.Min(SelectedIndex, items.Count() - 1);
+                SelectionMode &= ~SelectionMode.Multiple;
+            }
+            else
+            {
+                SelectionMode |= SelectionMode.Multiple;
             }
 
-            SelectedIndex = index;
+            if (_selection.AutoSelect)
+            {
+                SelectionMode |= SelectionMode.AlwaysSelected;
+            }
+            else
+            {
+                SelectionMode &= ~SelectionMode.AlwaysSelected;
+            }
+
+            if (Items is INotifyCollectionChanged incc)
+            {
+                // At this point we can be sure that SelectionModel has subscribed to collection
+                // changes.
+                incc.CollectionChanged += AfterItemsCollectionChanged;
+            }
+
+            UpdateContainerSelection();
+
+            var selectedIndex = SelectedIndex;
+            var selectedItem = SelectedItem;
+
+            if (_selectedIndex != selectedIndex)
+            {
+                RaisePropertyChanged(SelectedIndexProperty, _selectedIndex, selectedIndex);
+                _selectedIndex = selectedIndex;
+            }
+
+            if (_selectedItem != selectedItem)
+            {
+                RaisePropertyChanged(SelectedItemProperty, _selectedItem, selectedItem);
+                _selectedItem = selectedItem;
+            }
+
+            if (selectedIndex != -1)
+            {
+                RaiseEvent(new SelectionChangedEventArgs(
+                    SelectionChangedEvent,
+                    Array.Empty<object>(),
+                    Selection.SelectedItems.ToList()));
+            }
+        }
+
+        private void AfterItemsCollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+        {
+            if (e.Action == NotifyCollectionChangedAction.Add)
+            {
+                AddSelectedContainersToSelection(e.NewStartingIndex, e.NewItems);
+            }
+        }
+
+        private void AddSelectedContainersToSelection(int index, IEnumerable items)
+        {
+            foreach (var i in items)
+            {
+                if ((i as ISelectable)?.IsSelected == true)
+                {
+                    Selection.Select(index);
+                }
+
+                ++index;
+            }
         }
 
         /// <summary>
@@ -813,34 +808,25 @@ namespace Avalonia.Controls.Primitives
 
         private void MarkContainersUnselected()
         {
-            foreach (var container in ItemContainerGenerator.Containers)
+            if (Presenter is IPanel panel)
             {
-                MarkContainerSelected(container.ContainerControl, false);
+                foreach (var container in panel.Children)
+                {
+                    MarkContainerSelected(container, false);
+                }
             }
         }
 
         private void UpdateContainerSelection()
         {
-            foreach (var container in ItemContainerGenerator.Containers)
+            if (Presenter is IPanel panel)
             {
-                MarkContainerSelected(
-                    container.ContainerControl,
-                    Selection.IsSelected(container.Index) != false);
-            }
-        }
-
-        /// <summary>
-        /// Sets an item container's 'selected' class or <see cref="ISelectable.IsSelected"/>.
-        /// </summary>
-        /// <param name="index">The index of the item.</param>
-        /// <param name="selected">Whether the item should be selected or deselected.</param>
-        private void MarkItemSelected(int index, bool selected)
-        {
-            var container = ItemContainerGenerator?.ContainerFromIndex(index);
-
-            if (container != null)
-            {
-                MarkContainerSelected(container, selected);
+                foreach (var container in panel.Children)
+                {
+                    MarkContainerSelected(
+                        container,
+                        Selection.IsSelected(GetContainerIndex(container)) != false);
+                }
             }
         }
 
@@ -891,6 +877,16 @@ namespace Avalonia.Controls.Primitives
             {
                 UpdateFinished();
             }
+        }
+
+        private SelectionModel CreateDefaultSelectionModel()
+        {
+            return new SelectionModel
+            {
+                SingleSelect = !SelectionMode.HasFlagCustom(SelectionMode.Multiple),
+                AutoSelect = SelectionMode.HasFlagCustom(SelectionMode.AlwaysSelected),
+                RetainSelectionOnReset = true,
+            };
         }
     }
 }

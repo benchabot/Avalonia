@@ -124,9 +124,9 @@
                     CornerRadius="{DynamicResource OverlayCornerRadius}">
               <ScrollViewer>
                 <ItemsPresenter Name="PART_ItemsPresenter"
-                                Items="{TemplateBinding Items}"
-                                ItemsPanel="{TemplateBinding ItemsPanel}"
+                                Items="{TemplateBinding ItemsView}"
                                 ItemTemplate="{TemplateBinding ItemTemplate}"
+                                Layout="{TemplateBinding Layout}"
                                 Margin="{DynamicResource MenuFlyoutScrollerMargin}"
                                 Grid.IsSharedSizeScope="True" />
               </ScrollViewer>
@@ -172,9 +172,9 @@
                       CornerRadius="{DynamicResource OverlayCornerRadius}">
                 <ScrollViewer>
                   <ItemsPresenter Name="PART_ItemsPresenter"
-                                  Items="{TemplateBinding Items}"
-                                  ItemsPanel="{TemplateBinding ItemsPanel}"
+                                  Items="{TemplateBinding ItemsView}"
                                   ItemTemplate="{TemplateBinding ItemTemplate}"
+                                  Layout="{TemplateBinding Layout}"
                                   Margin="{DynamicResource MenuFlyoutScrollerMargin}"
                                   Grid.IsSharedSizeScope="True" />
                 </ScrollViewer>
