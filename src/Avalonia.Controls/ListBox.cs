@@ -1,7 +1,10 @@
 using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 using Avalonia.Controls.Generators;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.VisualTree;
 
@@ -39,6 +42,7 @@ namespace Avalonia.Controls
             SelectingItemsControl.SelectionModeProperty;
 
         private IScrollable? _scroll;
+        private bool _rangeSelecting;
 
         static ListBox()
         {
@@ -50,8 +54,8 @@ namespace Avalonia.Controls
         /// </summary>
         public IScrollable? Scroll
         {
-            get { return _scroll; }
-            private set { SetAndRaise(ScrollProperty, ref _scroll, value); }
+            get => _scroll;
+            private set => SetAndRaise(ScrollProperty, ref _scroll, value);
         }
 
         /// <inheritdoc/>
@@ -79,8 +83,8 @@ namespace Avalonia.Controls
         /// </remarks>
         public new SelectionMode SelectionMode
         {
-            get { return base.SelectionMode; }
-            set { base.SelectionMode = value; }
+            get => base.SelectionMode;
+            set => base.SelectionMode = value;
         }
 
         /// <summary>
@@ -93,7 +97,6 @@ namespace Avalonia.Controls
         /// </summary>
         public void UnselectAll() => Selection.ClearSelection();
 
-        /// <inheritdoc/>
         protected override IItemContainerGenerator CreateItemContainerGenerator()
         {
             return new ItemContainerGenerator<ListBoxItem>(
@@ -102,22 +105,48 @@ namespace Avalonia.Controls
                 ListBoxItem.ContentTemplateProperty);
         }
 
-        /// <inheritdoc/>
-        protected override void OnGotFocus(GotFocusEventArgs e)
+        protected override void OnKeyDown(KeyEventArgs e)
         {
-            base.OnGotFocus(e);
-
-            if (e.NavigationMethod == NavigationMethod.Directional)
+            if (!e.Handled)
             {
-                e.Handled = UpdateSelectionFromEventSource(
-                    e.Source,
-                    true,
-                    (e.KeyModifiers & KeyModifiers.Shift) != 0,
-                    (e.KeyModifiers & KeyModifiers.Control) != 0);
+                var direction = e.Key.ToNavigationDirection();
+                var ctrl = e.KeyModifiers.HasFlagCustom(KeyModifiers.Control);
+                var shift = e.KeyModifiers.HasFlagCustom(KeyModifiers.Shift);
+
+                if (direction.HasValue && (!ctrl || shift))
+                {
+                    try
+                    {
+                        _rangeSelecting = shift;
+                        e.Handled = MoveSelection(
+                            direction.Value,
+                            shift);
+                    }
+                    finally
+                    {
+                        _rangeSelecting = false;
+                    }
+                }
             }
+
+            if (!e.Handled)
+            {
+                var keymap = AvaloniaLocator.Current.GetService<PlatformHotkeyConfiguration>();
+                bool Match(List<KeyGesture> gestures) => gestures.Any(g => g.Matches(e));
+
+                if (ItemCount > 0 &&
+                    Match(keymap.SelectAll) &&
+                    (((SelectionMode & SelectionMode.Multiple) != 0) ||
+                      (SelectionMode & SelectionMode.Toggle) != 0))
+                {
+                    Selection.SelectAll();
+                    e.Handled = true;
+                }
+            }
+
+            base.OnKeyDown(e);
         }
 
-        /// <inheritdoc/>
         protected override void OnPointerPressed(PointerPressedEventArgs e)
         {
             base.OnPointerPressed(e);
